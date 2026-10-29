@@ -15,10 +15,16 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include "Common/Data/Text/I18n.h"
 #include "Common/File/Path.h"
+#include "Common/Net/Resolve.h"
 #include "Common/StringUtils.h"
 #include "Common/System/Request.h"
 #include "Common/System/System.h"
@@ -116,6 +122,175 @@ UI::View *AddNicknameChoice(SettingsPageHost *host, UI::ViewGroup *parent) {
 	return nickname;
 }
 
+// Room codes are an IPv4 address packed into 7 characters (5 bits each), which is easier to read out
+// or type on a phone than dotted numbers. The alphabet leaves out I, L, O and U.
+static const char kRoomCodeAlphabet[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+constexpr int ROOM_CODE_LENGTH = 7;
+
+static bool ParseIPv4(const std::string &str, uint32_t *out) {
+	unsigned int parts[4];
+	char extra = 0;
+	if (sscanf(str.c_str(), "%u.%u.%u.%u%c", &parts[0], &parts[1], &parts[2], &parts[3], &extra) != 4) {
+		return false;
+	}
+	uint32_t value = 0;
+	for (int i = 0; i < 4; i++) {
+		if (parts[i] > 255) {
+			return false;
+		}
+		value = (value << 8) | parts[i];
+	}
+	*out = value;
+	return true;
+}
+
+static std::string IPv4ToString(uint32_t ip) {
+	return StringFromFormat("%u.%u.%u.%u", (ip >> 24) & 255, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255);
+}
+
+static std::string IPv4ToRoomCode(uint32_t ip) {
+	std::string code(ROOM_CODE_LENGTH, '0');
+	for (int i = ROOM_CODE_LENGTH - 1; i >= 0; i--) {
+		code[i] = kRoomCodeAlphabet[ip & 31];
+		ip >>= 5;
+	}
+	return code;
+}
+
+static bool RoomCodeToIPv4(std::string_view code, uint32_t *ip) {
+	uint64_t value = 0;
+	int count = 0;
+	for (char ch : code) {
+		if (ch == ' ' || ch == '-') {
+			continue;
+		}
+		ch = (char)toupper((unsigned char)ch);
+		if (ch == 'O') {
+			ch = '0';
+		} else if (ch == 'I' || ch == 'L') {
+			ch = '1';
+		}
+		const char *pos = ch ? strchr(kRoomCodeAlphabet, ch) : nullptr;
+		if (!pos) {
+			return false;
+		}
+		value = value * 32 + (uint64_t)(pos - kRoomCodeAlphabet);
+		count++;
+		if (count > ROOM_CODE_LENGTH) {
+			return false;
+		}
+	}
+	if (count != ROOM_CODE_LENGTH || value > 0xFFFFFFFFULL) {
+		return false;
+	}
+	*ip = (uint32_t)value;
+	return true;
+}
+
+// Accepts a room code or an address. Anything with a dot in it is used as typed, so hostnames still work.
+static std::string RoomInputToHost(const std::string &input) {
+	std::string trimmed(StripSpaces(input));
+	if (trimmed.empty()) {
+		return std::string();
+	}
+	uint32_t ip;
+	if (trimmed.find('.') == std::string::npos && RoomCodeToIPv4(trimmed, &ip)) {
+		return IPv4ToString(ip);
+	}
+	return trimmed;
+}
+
+// Settings that rooms need, on both sides. Relay mode is for public servers, and rooms are direct.
+static void EnableRoomNetworking(bool hosting, const std::string &server) {
+	g_Config.bEnableWlan = true;
+	g_Config.bEnableAdhocServer = hosting;
+	g_Config.sProAdhocServer = server;
+	if (!PSP_IsInited()) {
+		g_Config.iAdhocServerRelayMode = (int)AdhocServerRelayMode::AlwaysOff;
+	}
+	System_RequestLocalNetworkPermission();
+}
+
+// Starts the built-in server, and shows the code that the other players type in to join.
+class CreateRoomScreen : public UI::PopupScreen {
+public:
+	CreateRoomScreen() : PopupScreen(T(I18NCat::NETWORKING, "Create room"), T(I18NCat::DIALOG, "Back")) {
+		EnableRoomNetworking(true, "localhost");
+	}
+
+	const char *tag() const override { return "CreateRoom"; }
+
+protected:
+	void CreatePopupContents(UI::ViewGroup *parent) override {
+		using namespace UI;
+		auto n = GetI18NCategory(I18NCat::NETWORKING);
+
+		Margins contentMargins(12, 4);
+		TextView *hint = parent->Add(new TextView(n->T("RoomHostHint", "Turn on your phone's hotspot and have your friends connect to it with Wi-Fi, or use the same Wi-Fi network. Then give them the room code and let them pick Join room."), new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, contentMargins)));
+		hint->SetWordWrap();
+
+		std::vector<std::string> ips;
+		net::GetLocalIP4List(ips);
+		int shown = 0;
+		for (const std::string &ip : ips) {
+			if (startsWith(ip, "127.") || startsWith(ip, "169.254.") || startsWith(ip, "0.")) {
+				continue;
+			}
+			uint32_t value;
+			if (!ParseIPv4(ip, &value)) {
+				continue;
+			}
+			std::string code = IPv4ToRoomCode(value);
+
+			LinearLayout *row = parent->Add(new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, contentMargins)));
+			LinearLayout *lines = row->Add(new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(1.0f, Gravity::G_VCENTER)));
+			lines->SetSpacing(0.0f);
+			lines->Add(new TextView(code));
+			TextView *address = lines->Add(new TextView(ip));
+			address->SetTextSize(TextSize::Small);
+			row->Add(new Choice(ImageID("I_FILE_COPY"), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT)))->OnClick.Add([code](UI::EventParams &) {
+				System_CopyStringToClipboard(code);
+			});
+			shown++;
+		}
+
+		if (shown == 0) {
+			NoticeView *notice = parent->Add(new NoticeView(NoticeLevel::WARN, n->T("RoomNoNetwork", "No local network address found. Turn on the hotspot or connect to Wi-Fi first."), ""));
+			notice->SetWrapText(true);
+		}
+	}
+};
+
+// Takes the code (or address) from the host, and points the game at their server.
+class JoinRoomScreen : public UI::PopupScreen {
+public:
+	JoinRoomScreen() : PopupScreen(T(I18NCat::NETWORKING, "Join room"), T(I18NCat::NETWORKING, "Join"), T(I18NCat::DIALOG, "Cancel")) {}
+
+	const char *tag() const override { return "JoinRoom"; }
+
+protected:
+	void CreatePopupContents(UI::ViewGroup *parent) override {
+		using namespace UI;
+		auto n = GetI18NCategory(I18NCat::NETWORKING);
+
+		PopupTextInputChoice *input = parent->Add(new PopupTextInputChoice(GetRequesterToken(), &input_, n->T("Room code or IP address"), "", 64, screenManager()));
+		input->SetShadowText(n->T("Room code or IP address"));
+	}
+
+	bool CanComplete(DialogResult result) override {
+		return result != DR_OK || !RoomInputToHost(input_).empty();
+	}
+
+	void OnCompleted(DialogResult result) override {
+		if (result == DR_OK) {
+			EnableRoomNetworking(false, RoomInputToHost(input_));
+		}
+	}
+
+private:
+	std::string input_;
+};
+
 static void BuildChatSettingsPage(SettingsPage *page) {
 	using namespace UI;
 	SettingsPageHost *host = page->Host();
@@ -141,6 +316,14 @@ static void BuildChatSettingsPage(SettingsPage *page) {
 void BuildNetworkingSettings(SettingsPage *page) {
 	using namespace UI;
 	SettingsPageHost *host = page->Host();
+
+	page->Header("Rooms");
+	page->Choice("Create room", ImageID("I_PLUS")).OnClick([host](EventParams &e) {
+		host->PageScreenManager()->push(new CreateRoomScreen());
+	});
+	page->Choice("Join room", ImageID("I_PLAY")).OnClick([host](EventParams &e) {
+		host->PageScreenManager()->push(new JoinRoomScreen());
+	});
 
 	page->Header();
 
