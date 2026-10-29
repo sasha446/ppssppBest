@@ -55,11 +55,6 @@ jobs:
       #  with:
       #    ndk-version: r21e
 
-      - name: Test androidGitVersion
-        run: |
-          echo "count=${{steps.valid-tags.outputs.count}}"
-          gradle --quiet androidGitVersion
-      
       - name: Assemble APK
         run: ./gradlew assemble${{ github.event.inputs.buildVariant }} --stacktrace
       
