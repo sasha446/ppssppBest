@@ -16,7 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "ppsspp_config.h"
 
@@ -25,6 +27,7 @@
 #include "Common/GPU/thin3d.h"
 #include "Common/System/Display.h"
 #include "Common/System/NativeApp.h"
+#include "Common/System/Request.h"
 #include "Common/System/System.h"
 #include "Common/UI/PopupScreens.h"
 #include "Common/UI/ScreenManager.h"
@@ -93,6 +96,50 @@ static void OnRenderingDevice(SettingsPageHost *host) {
 	}
 }
 
+// Bundles of the settings that trade speed for looks, for people who don't want to tune each one.
+struct GraphicsPreset {
+	const char *name;
+	int internalResolution;
+	int anisotropyLevel;
+	int texFiltering;
+	bool smart2DTexFiltering;
+	bool autoFrameSkip;
+};
+
+static const GraphicsPreset graphicsPresets[] = {
+	{ "Low-end device", 1, 0, 1, false, true },
+	{ "Balanced", 2, 2, 1, false, false },
+	{ "High quality", 3, 4, 4, true, false },
+};
+
+static bool MatchesGraphicsPreset(const GraphicsPreset &preset) {
+	return g_Config.iInternalResolution == preset.internalResolution &&
+		g_Config.iAnisotropyLevel == preset.anisotropyLevel &&
+		g_Config.iTexFiltering == preset.texFiltering &&
+		g_Config.bSmart2DTexFiltering == preset.smart2DTexFiltering &&
+		g_Config.bAutoFrameSkip == preset.autoFrameSkip;
+}
+
+static void ApplyGraphicsPreset(const GraphicsPreset &preset) {
+	int previousResolution = g_Config.iInternalResolution;
+	g_Config.iInternalResolution = preset.internalResolution;
+	g_Config.iAnisotropyLevel = preset.anisotropyLevel;
+	g_Config.iTexFiltering = preset.texFiltering;
+	g_Config.bSmart2DTexFiltering = preset.smart2DTexFiltering;
+	g_Config.bAutoFrameSkip = preset.autoFrameSkip;
+	g_Config.iFrameSkip = 0;
+	g_Config.iMultiSampleLevel = 0;
+	g_Config.iTexScalingLevel = 1;
+	g_Config.UpdateAfterSettingAutoFrameSkip();
+
+	// The same follow-ups as when the individual settings are changed.
+	if (g_Config.iAndroidHwScale == 1 && previousResolution != preset.internalResolution) {
+		System_RecreateActivity();
+	}
+	System_PostUIMessage(UIMessage::GPU_RENDER_RESIZED);
+	System_PostUIMessage(UIMessage::GPU_CONFIG_CHANGED);
+}
+
 static void BuildSpeedHacksPage(SettingsPage *page) {
 	using namespace UI;
 
@@ -142,6 +189,42 @@ void BuildGraphicsSettings(SettingsPage *page) {
 
 	Draw::DrawContext *draw = host->PageScreenManager()->getDrawContext();
 	int deviceType = System_GetPropertyInt(SYSPROP_DEVICE_TYPE);
+
+	page->Header("Presets");
+	page->Custom("Graphics preset", [host](UI::ViewGroup *parent) -> UI::View * {
+		auto gr = GetI18NCategory(I18NCat::GRAPHICS);
+		std::string current(gr->T("Custom"));
+		for (const GraphicsPreset &preset : graphicsPresets) {
+			if (MatchesGraphicsPreset(preset)) {
+				current = gr->T(preset.name);
+				break;
+			}
+		}
+		Choice *choice = parent->Add(new ChoiceWithFixedValueDisplay(current, gr->T("Graphics preset")));
+		choice->OnClick.Add([host](UI::EventParams &e) {
+			auto gr = GetI18NCategory(I18NCat::GRAPHICS);
+			std::vector<std::string> items;
+			int selected = -1;
+			for (int i = 0; i < (int)std::size(graphicsPresets); i++) {
+				items.push_back(std::string(gr->T(graphicsPresets[i].name)));
+				if (MatchesGraphicsPreset(graphicsPresets[i])) {
+					selected = i;
+				}
+			}
+			ListPopupScreen *popup = new ListPopupScreen(gr->T("Graphics preset"), items, selected, [host](int index) {
+				if (index >= 0 && index < (int)std::size(graphicsPresets)) {
+					ApplyGraphicsPreset(graphicsPresets[index]);
+					host->RecreatePageViews();
+				}
+			});
+			if (e.v) {
+				popup->SetPopupOrigin(e.v);
+			}
+			host->PageScreenManager()->push(popup);
+		});
+		return choice;
+	});
+	page->Hint({ I18NCat::GRAPHICS, "PresetHint", "Changes several settings at once. You can still adjust each one below." });
 
 	page->Header("Rendering");
 
