@@ -63,6 +63,11 @@ static constexpr float LARGE_LIST_INFO_SIZE = 64.0f;
 static constexpr float LARGE_LIST_FOLDER_H = 50.0f;
 
 // Where the text starts in the list modes.
+// Carousel (the LARGE_LIST mode): cover size, and the strip above it for the focused game's title.
+static constexpr float CAROUSEL_W = 150.0f;
+static constexpr float CAROUSEL_H = 210.0f;
+static constexpr float CAROUSEL_TITLE_H = 40.0f;
+
 static float ListTextX(GameBrowserViewMode viewMode) {
 	if (viewMode == GameBrowserViewMode::LARGE_LIST) {
 		return LARGE_LIST_LEFT_PAD + LARGE_LIST_ICON_W * g_Config.fGameGridScale + 20.0f;
@@ -170,8 +175,8 @@ public:
 			h = 80 * g_Config.fGameGridScale;
 			break;
 		case GameBrowserViewMode::LARGE_LIST:
-			w = 500;
-			h = LARGE_LIST_ICON_H * g_Config.fGameGridScale + LARGE_LIST_PAD * 2;
+			w = CAROUSEL_W * g_Config.fGameGridScale + LARGE_LIST_PAD * 2;
+			h = (CAROUSEL_TITLE_H + CAROUSEL_H) * g_Config.fGameGridScale + LARGE_LIST_PAD * 2;
 			break;
 		default:  // List
 			w = 500;
@@ -319,7 +324,8 @@ private:
 
 	// The large list has room for an info button on each line, doing the same as a long press.
 	bool HasInfoButton() const {
-		return viewMode_ == GameBrowserViewMode::LARGE_LIST && holdEnabled_;
+		// The carousel moves focus left and right, so it has no separate info button. A long press still works.
+		return false;
 	}
 	Bounds InfoButtonBounds() const {
 		return Bounds(bounds_.x2() - LARGE_LIST_INFO_SIZE - LARGE_LIST_PAD, bounds_.centerY() - LARGE_LIST_INFO_SIZE * 0.5f, LARGE_LIST_INFO_SIZE, LARGE_LIST_INFO_SIZE);
@@ -474,10 +480,11 @@ void GameButton::Draw(UIContext &dc) {
 	int w = viewMode_ == GameBrowserViewMode::GRID ? bounds_.w : 144;
 	int h = bounds_.h;
 	if (viewMode_ == GameBrowserViewMode::LARGE_LIST) {
+		const float cScale = g_Config.fGameGridScale;
 		x += LARGE_LIST_LEFT_PAD;
-		y += LARGE_LIST_PAD;
-		w = LARGE_LIST_ICON_W * g_Config.fGameGridScale;
-		h = LARGE_LIST_ICON_H * g_Config.fGameGridScale;
+		y += LARGE_LIST_PAD + CAROUSEL_TITLE_H * cScale;
+		w = CAROUSEL_W * cScale;
+		h = CAROUSEL_H * cScale;
 	}
 	const float textX = ListTextX(viewMode_);
 
@@ -559,7 +566,15 @@ void GameButton::Draw(UIContext &dc) {
 		dc.SetFontScale(1.0f, 1.0f);
 	}
 
-	if (imageIcon.isValid()) {
+	if (viewMode_ == GameBrowserViewMode::LARGE_LIST) {
+		// Carousel: the focused game's title goes above its cover, and a missing cover shows the type icon centred.
+		if (HasFocus()) {
+			dc.DrawTextRectSqueeze(ginfo->GetTitle(), Bounds(bounds_.x + LARGE_LIST_PAD, bounds_.y, bounds_.w - LARGE_LIST_PAD * 2, CAROUSEL_TITLE_H * g_Config.fGameGridScale), dc.GetTheme().infoStyle.fgColor, ALIGN_CENTER);
+		}
+		if (!texture && imageIcon.isValid()) {
+			dc.Draw()->DrawImage(imageIcon, x + w * 0.5f, y + h * 0.5f, 0.88f * g_Config.fGameGridScale, dc.GetTheme().itemStyle.fgColor, ALIGN_CENTER);
+		}
+	} else if (imageIcon.isValid()) {
 		Style style = dc.GetTheme().itemStyle;
 
 		if (rowFocused) style = dc.GetTheme().itemFocusedStyle;
@@ -1027,6 +1042,8 @@ void GameBrowser::Refresh() {
 	lastScale_ = g_Config.fGameGridScale;
 	lastViewMode_ = ViewMode();
 	const bool gridStyle = lastViewMode_ == GameBrowserViewMode::GRID;
+	// Grid and carousel items are sized by their content, so they wrap instead of filling the row.
+	const bool wrapItems = gridStyle || lastViewMode_ == GameBrowserViewMode::LARGE_LIST;
 
 	// Kill all the contents
 	Clear();
@@ -1131,12 +1148,22 @@ void GameBrowser::Refresh() {
 
 	if (gridStyle) {
 		gameList_ = new UI::GridLayoutList(UI::GridLayoutSettings(150 * g_Config.fGameGridScale, 85 * g_Config.fGameGridScale), new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(0, 0, 6, 0)));
+	} else if (lastViewMode_ == GameBrowserViewMode::LARGE_LIST) {
+		UI::LinearLayout *gl = new UI::LinearLayoutList(ORIENT_HORIZONTAL, new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT));
+		gl->SetSpacing(12.0f);
+		gameList_ = gl;
+		// The carousel scrolls sideways, so the row goes inside a horizontal scroll view.
+		UI::ScrollView *scroll = new UI::ScrollView(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT));
+		scroll->Add(gameList_);
+		Add(scroll);
 	} else {
 		UI::LinearLayout *gl = new UI::LinearLayoutList(ORIENT_VERTICAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT));
 		gl->SetSpacing(4.0f);
 		gameList_ = gl;
 	}
-	Add(gameList_);
+	if (lastViewMode_ != GameBrowserViewMode::LARGE_LIST) {
+		Add(gameList_);
+	}
 
 	// Find games in the current directory and create new ones.
 	std::vector<DirButton *> dirButtons;
@@ -1149,7 +1176,7 @@ void GameBrowser::Refresh() {
 	std::vector<Path> filenames;
 	if (HasSpecialFiles(filenames)) {
 		for (size_t i = 0; i < filenames.size(); i++) {
-			gameButtons.push_back(new GameButton(filenames[i], lastViewMode_, new UI::LinearLayoutParams(gridStyle ? UI::WRAP_CONTENT : UI::FILL_PARENT, UI::WRAP_CONTENT)));
+			gameButtons.push_back(new GameButton(filenames[i], lastViewMode_, new UI::LinearLayoutParams(wrapItems ? UI::WRAP_CONTENT : UI::FILL_PARENT, UI::WRAP_CONTENT)));
 		}
 	} else if (!listingPending_) {
 		std::vector<File::FileInfo> fileInfo;
@@ -1177,7 +1204,7 @@ void GameBrowser::Refresh() {
 					dirButtons.push_back(new DirButton(fileInfo[i].fullName, name, lastViewMode_, new UI::LinearLayoutParams(UI::FILL_PARENT, UI::FILL_PARENT)));
 				}
 			} else {
-				gameButtons.push_back(new GameButton(fileInfo[i].fullName, lastViewMode_, new UI::LinearLayoutParams(gridStyle ? UI::WRAP_CONTENT : UI::FILL_PARENT, UI::WRAP_CONTENT)));
+				gameButtons.push_back(new GameButton(fileInfo[i].fullName, lastViewMode_, new UI::LinearLayoutParams(wrapItems ? UI::WRAP_CONTENT : UI::FILL_PARENT, UI::WRAP_CONTENT)));
 			}
 		}
 
