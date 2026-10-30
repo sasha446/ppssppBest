@@ -26,6 +26,7 @@
 #include "Common/UI/ViewGroup.h"
 #include "Common/UI/Root.h"
 #include "Common/UI/ScreenManager.h"
+#include "Common/UI/PopupScreens.h"
 
 #include "Common/Math/curves.h"
 #include "Common/Net/URL.h"
@@ -1334,8 +1335,80 @@ std::vector<Path> GameBrowser::GetPinnedPaths() const {
 	return results;
 }
 
+// The game's box, drawn as a case with the cover on it and the disc behind, shown before the game starts.
+// Pressing it runs onPlay.
+class GameBoxView : public UI::Clickable {
+public:
+	GameBoxView(const Path &gamePath, UI::LayoutParams *layoutParams = nullptr)
+		: UI::Clickable(layoutParams), gamePath_(gamePath) {}
+
+	void Draw(UIContext &dc) override {
+		std::shared_ptr<GameInfo> ginfo = g_gameInfoCache->GetInfo(dc.GetDrawContext(), gamePath_, GameInfoFlags::PARAM_SFO | GameInfoFlags::ICON);
+		const Bounds b = bounds_;
+
+		// Disc: a silver square sticking out to the right of the case.
+		dc.FillRect(Drawable(0xFFB8B8B8), Bounds(b.x + b.w * 0.42f, b.y + b.h * 0.08f, b.w * 0.5f, b.h * 0.84f));
+		// Case: the cover on the left, with a dark spine.
+		dc.FillRect(Drawable(0xFF202020), Bounds(b.x + b.w * 0.2f, b.y, b.w * 0.06f, b.h));
+
+		Draw::Texture *texture = ginfo->icon.texture;
+		const Bounds cover(b.x + b.w * 0.26f, b.y, b.w * 0.4f, b.h);
+		if (texture) {
+			dc.Draw()->Flush();
+			dc.RebindTexture();
+			dc.GetDrawContext()->BindTexture(0, texture);
+			dc.Draw()->DrawTexRect(cover.x, cover.y, cover.x2(), cover.y2(), 0, 0, 1, 1, 0xFFFFFFFF);
+			dc.Draw()->Flush();
+		} else {
+			dc.DrawTextRectSqueeze(ginfo->GetTitle(), cover, dc.GetTheme().infoStyle.fgColor, ALIGN_CENTER);
+		}
+
+		// Title and hint under the box.
+		dc.DrawTextRectSqueeze(ginfo->GetTitle(), Bounds(b.x, b.y2() - 40.0f, b.w, 36.0f), dc.GetTheme().infoStyle.fgColor, ALIGN_CENTER);
+	}
+
+private:
+	const Path gamePath_;
+};
+
+// Full-screen popup with the box. Pressing the box closes it and starts the game.
+class GameBoxScreen : public UI::PopupScreen {
+public:
+	GameBoxScreen(const Path &gamePath, std::function<void()> onPlay)
+		: PopupScreen(""), gamePath_(gamePath), onPlay_(std::move(onPlay)) {}
+
+	const char *tag() const override { return "GameBox"; }
+
+protected:
+	bool FillVertical() const override { return false; }
+	bool ShowButtons() const override { return false; }
+	UI::Size PopupWidth() const override { return 800.0f; }
+
+	void CreatePopupContents(UI::ViewGroup *parent) override {
+		GameBoxView *box = parent->Add(new GameBoxView(gamePath_, new UI::LinearLayoutParams(800.0f, 480.0f)));
+		box->OnClick.Add([this](UI::EventParams &) {
+			TriggerFinish(DR_OK);
+			onPlay_();
+		});
+	}
+
+private:
+	Path gamePath_;
+	std::function<void()> onPlay_;
+};
+
 void GameBrowser::GameButtonClick(UI::EventParams &e) {
 	GameButton *button = static_cast<GameButton *>(e.v);
+	if (ViewMode() == GameBrowserViewMode::LARGE_LIST) {
+		// In the carousel, the first press opens the game's box. Pressing the box starts the game.
+		const Path gamePath = button->GamePath();
+		screenManager_->push(new GameBoxScreen(gamePath, [this, gamePath]() {
+			UI::EventParams e2{};
+			e2.s = gamePath.ToString();
+			OnChoice.Trigger(e2);
+		}));
+		return;
+	}
 	UI::EventParams e2{};
 	e2.s = button->GamePath().ToString();
 	OnChoice.Trigger(e2);
