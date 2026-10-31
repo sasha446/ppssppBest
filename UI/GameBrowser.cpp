@@ -1347,9 +1347,9 @@ public:
 		const Bounds b = bounds_;
 
 		// Disc: a silver square sticking out to the right of the case.
-		dc.FillRect(Drawable(0xFFB8B8B8), Bounds(b.x + b.w * 0.42f, b.y + b.h * 0.08f, b.w * 0.5f, b.h * 0.84f));
+		dc.FillRect(UI::Drawable(0xFFB8B8B8), Bounds(b.x + b.w * 0.42f, b.y + b.h * 0.08f, b.w * 0.5f, b.h * 0.84f));
 		// Case: the cover on the left, with a dark spine.
-		dc.FillRect(Drawable(0xFF202020), Bounds(b.x + b.w * 0.2f, b.y, b.w * 0.06f, b.h));
+		dc.FillRect(UI::Drawable(0xFF202020), Bounds(b.x + b.w * 0.2f, b.y, b.w * 0.06f, b.h));
 
 		Draw::Texture *texture = ginfo->icon.texture;
 		const Bounds cover(b.x + b.w * 0.26f, b.y, b.w * 0.4f, b.h);
