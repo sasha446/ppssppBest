@@ -571,6 +571,13 @@ void GameButton::Draw(UIContext &dc) {
 		// Carousel: the focused game's title goes above its cover, and a missing cover shows the type icon centred.
 		if (HasFocus()) {
 			dc.DrawTextRectSqueeze(ginfo->GetTitle(), Bounds(bounds_.x + LARGE_LIST_PAD, bounds_.y, bounds_.w - LARGE_LIST_PAD * 2, CAROUSEL_TITLE_H * g_Config.fGameGridScale), dc.GetTheme().infoStyle.fgColor, ALIGN_CENTER);
+			// Neon frame around the focused cover, pulsing.
+			const float glow = (float)(sin(time_now_d() * 4.0) * 0.25 + 0.75);
+			const uint32_t neon = ((uint32_t)(glow * 255.0f) << 24) | 0x39FF88;
+			dc.FillRect(UI::Drawable(neon), Bounds(x - 3.0f, y - 3.0f, w + 6.0f, 3.0f));
+			dc.FillRect(UI::Drawable(neon), Bounds(x - 3.0f, y + h, w + 6.0f, 3.0f));
+			dc.FillRect(UI::Drawable(neon), Bounds(x - 3.0f, y, 3.0f, h));
+			dc.FillRect(UI::Drawable(neon), Bounds(x + w, y, 3.0f, h));
 		}
 		if (!texture && imageIcon.isValid()) {
 			dc.Draw()->DrawImage(imageIcon, x + w * 0.5f, y + h * 0.5f, 0.88f * g_Config.fGameGridScale, dc.GetTheme().itemStyle.fgColor, ALIGN_CENTER);
@@ -1335,40 +1342,82 @@ std::vector<Path> GameBrowser::GetPinnedPaths() const {
 	return results;
 }
 
-// The game's box, drawn as a case with the cover on it and the disc behind, shown before the game starts.
-// Pressing it runs onPlay.
+// The game's box, drawn as an open case: the disc on the left tray, the cover on the right. It animates in
+// when shown. Pressing it runs onPlay.
 class GameBoxView : public UI::Clickable {
 public:
 	GameBoxView(const Path &gamePath, UI::LayoutParams *layoutParams = nullptr)
-		: UI::Clickable(layoutParams), gamePath_(gamePath) {}
+		: UI::Clickable(layoutParams), gamePath_(gamePath), start_(time_now_d()) {}
 
 	void Draw(UIContext &dc) override {
 		std::shared_ptr<GameInfo> ginfo = g_gameInfoCache->GetInfo(dc.GetDrawContext(), gamePath_, GameInfoFlags::PARAM_SFO | GameInfoFlags::ICON);
 		const Bounds b = bounds_;
+		const double t = time_now_d() - start_;
 
-		// Disc: a silver square sticking out to the right of the case.
-		dc.FillRect(UI::Drawable(0xFFB8B8B8), Bounds(b.x + b.w * 0.42f, b.y + b.h * 0.08f, b.w * 0.5f, b.h * 0.84f));
-		// Case: the cover on the left, with a dark spine.
-		dc.FillRect(UI::Drawable(0xFF202020), Bounds(b.x + b.w * 0.2f, b.y, b.w * 0.06f, b.h));
+		// The case opens, then the disc rises out of the tray and floats.
+		const float open = ease((float)std::clamp(t / 0.6, 0.0, 1.0));
+		const float discT = ease((float)std::clamp((t - 0.25) / 0.6, 0.0, 1.0));
+		const float bob = (float)sin(t * 2.0) * 4.0f * discT;
+		const float pulse = (float)(sin(t * 4.0) * 0.25 + 0.75);
+
+		auto argb = [](uint32_t rgb, float a) {
+			return ((uint32_t)(std::clamp(a, 0.0f, 1.0f) * 255.0f) << 24) | (rgb & 0xFFFFFF);
+		};
 
 		Draw::Texture *texture = ginfo->icon.texture;
-		const Bounds cover(b.x + b.w * 0.26f, b.y, b.w * 0.4f, b.h);
+		const float aspect = texture ? (float)texture->Width() / (float)texture->Height() : 0.7f;
+		float ch = b.h * 0.7f;
+		float cw = ch * aspect;
+		if (cw > b.w * 0.42f) {
+			cw = b.w * 0.42f;
+			ch = cw / aspect;
+		}
+		const float cx = b.centerX();
+		const float top = b.centerY() - ch * 0.5f;
+
+		// Neon glow behind the case.
+		dc.FillRect(UI::Drawable(argb(0x39FF88, 0.18f * pulse * open)), Bounds(cx - cw * open - 8.0f, top - 8.0f, cw * (1.0f + open) + 16.0f, ch + 16.0f));
+
+		// Tray on the left, growing out from the spine.
+		const Bounds tray(cx - cw * open, top, cw * open, ch);
+		dc.FillRect(UI::Drawable(argb(0x0B1410, 1.0f)), tray);
+
+		// Disc: a silver circle with a green label and a hole, rising out of the tray.
+		const float dd = std::min(tray.w, ch) * 0.88f;
+		if (dd > 4.0f && discT > 0.0f) {
+			const float dx = tray.centerX();
+			const float dy = tray.centerY() + (1.0f - discT) * ch * 0.2f + bob;
+			dc.Draw()->DrawImageStretch(ImageID("I_CIRCLE"), dx - dd * 0.5f, dy - dd * 0.5f, dx + dd * 0.5f, dy + dd * 0.5f, argb(0xDCDCDC, discT));
+			dc.Draw()->DrawImageStretch(ImageID("I_CIRCLE"), dx - dd * 0.19f, dy - dd * 0.19f, dx + dd * 0.19f, dy + dd * 0.19f, argb(0x39FF88, 0.9f * discT));
+			dc.Draw()->DrawImageStretch(ImageID("I_CIRCLE"), dx - dd * 0.05f, dy - dd * 0.05f, dx + dd * 0.05f, dy + dd * 0.05f, argb(0x0B1410, discT));
+			// A turning arrow on the label, so the disc looks like it's spinning.
+			dc.Draw()->DrawImageRotated(ImageID("I_ROTATE_LEFT"), dx, dy, std::max(0.6f, dd / 260.0f), (float)(t * 3.0), argb(0x04110A, discT));
+		}
+
+		// Spine in neon green.
+		dc.FillRect(UI::Drawable(argb(0x39FF88, 0.7f * open)), Bounds(cx - 3.0f, top, 6.0f, ch));
+
+		// Cover on the right, sliding in from the spine.
+		const Bounds cover(cx + (1.0f - open) * cw * 0.3f, top, cw, ch);
 		if (texture) {
 			dc.Draw()->Flush();
 			dc.RebindTexture();
 			dc.GetDrawContext()->BindTexture(0, texture);
-			dc.Draw()->DrawTexRect(cover.x, cover.y, cover.x2(), cover.y2(), 0, 0, 1, 1, 0xFFFFFFFF);
+			dc.Draw()->DrawTexRect(cover.x, cover.y, cover.x2(), cover.y2(), 0, 0, 1, 1, argb(0xFFFFFF, open));
 			dc.Draw()->Flush();
 		} else {
 			dc.DrawTextRectSqueeze(ginfo->GetTitle(), cover, dc.GetTheme().infoStyle.fgColor, ALIGN_CENTER);
 		}
 
-		// Title and hint under the box.
-		dc.DrawTextRectSqueeze(ginfo->GetTitle(), Bounds(b.x, b.y2() - 40.0f, b.w, 36.0f), dc.GetTheme().infoStyle.fgColor, ALIGN_CENTER);
+		// Title above the case, hint below it.
+		const std::string title = ginfo->GetTitle();
+		dc.DrawTextRectSqueeze(title, Bounds(b.x, top - 56.0f, b.w, 44.0f), argb(0x39FF88, open), ALIGN_CENTER);
+		dc.DrawTextRectSqueeze("Tap the box to play", Bounds(b.x, top + ch + 16.0f, b.w, 36.0f), argb(0x7CFFB2, (0.4f + 0.6f * pulse) * discT), ALIGN_CENTER);
 	}
 
 private:
 	const Path gamePath_;
+	const double start_;
 };
 
 // Full-screen popup with the box. Pressing the box closes it and starts the game.
@@ -1380,12 +1429,12 @@ public:
 	const char *tag() const override { return "GameBox"; }
 
 protected:
-	bool FillVertical() const override { return false; }
+	bool FillVertical() const override { return true; }
 	bool ShowButtons() const override { return false; }
-	UI::Size PopupWidth() const override { return 800.0f; }
+	UI::Size PopupWidth() const override { return g_display.dp_xres; }
 
 	void CreatePopupContents(UI::ViewGroup *parent) override {
-		GameBoxView *box = parent->Add(new GameBoxView(gamePath_, new UI::LinearLayoutParams(800.0f, 480.0f)));
+		GameBoxView *box = parent->Add(new GameBoxView(gamePath_, new UI::LinearLayoutParams(UI::FILL_PARENT, UI::FILL_PARENT, 1.0f)));
 		box->OnClick.Add([this](UI::EventParams &) {
 			TriggerFinish(DR_OK);
 			onPlay_();
